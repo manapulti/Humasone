@@ -4,16 +4,15 @@
 // a sketch everywhere in the app and is never presented as a vocal render.
 //
 // Live mode talks to ACE-Step's async API, as documented in the engine repo
-// (https://github.com/ace-step/ACE-Step-1.5):
-//   POST {baseUrl}/release_task   -> { task_id }
-//   POST {baseUrl}/query_result   -> { status, ... }   (poll until done)
-//   GET  {baseUrl}/v1/audio?task_id=... -> the finished audio bytes
-//
-// Honest note: the exact request field names for /release_task vary slightly
-// between ACE-Step releases. The adapter below follows the repo's documented
-// async flow; the first live run against a real engine is the moment to confirm
-// the field names, and the adapter is the one file to adjust. Retries are
-// built into polling so a flaky GPU box does not lose a song.
+// (https://github.com/ace-step/ACE-Step-1.5, docs/en/API.md):
+//   POST {baseUrl}/release_task   -> { data: { task_id, status, queue_position }, code: 200 }
+//   POST {baseUrl}/query_result   -> { data: [{ task_id, status, result }] }  (poll until status 1)
+//   GET  {baseUrl}<file from result> -> the finished audio bytes
+// Status is an integer: 0 queued/running, 1 succeeded, 2 failed.
+// Field names verified 2026-11-26 against docs/en/API.md (Gemini's five catches,
+// all confirmed against the live doc). The first live run against a real engine
+// is still the proof. Retries are built into polling so a flaky GPU box does
+// not lose a song.
 
 import { renderSketchWav, renderStemWav, wavDurationSec } from "@shared/sketch";
 import type { CreateSongInput, StemName } from "@shared/types";
@@ -97,7 +96,7 @@ export async function generateLive(
     style: input.styleText ?? "",
     model: cfg.model,
     audio_duration: input.durationSec ?? 120,
-    format: "mp3",
+    audio_format: "mp3",
   };
   if (input.taskType && input.taskType !== "generate") {
     payload.task_type = input.taskType;
@@ -108,7 +107,8 @@ export async function generateLive(
     { method: "POST", headers, body: JSON.stringify(payload) },
     "release_task",
   );
-  const taskId = String(released.task_id ?? released.taskId ?? "");
+  const releasedData = (released.data ?? released) as Record<string, unknown>;
+  const taskId = String(releasedData.task_id ?? releasedData.taskId ?? "");
   if (!taskId) throw new Error("release_task returned no task_id");
 
   // Poll until the task finishes. A 4-minute song can take a couple of minutes
@@ -122,7 +122,7 @@ export async function generateLive(
     try {
       result = await fetchJson(
         `${base}/query_result`,
-        { method: "POST", headers, body: JSON.stringify({ task_id: taskId }) },
+        { method: "POST", headers, body: JSON.stringify({ task_id_list: [taskId] }) },
         "query_result",
       );
       consecutiveErrors = 0;
@@ -131,25 +131,39 @@ export async function generateLive(
       if (consecutiveErrors >= 5) throw err;
       continue;
     }
-    const status = String(result.status ?? result.state ?? "").toLowerCase();
-    if (status === "failed" || status === "error") {
-      throw new Error(`engine task failed: ${JSON.stringify(result).slice(0, 300)}`);
+    // Response is { data: [{ task_id, status, result }] }; status is an integer
+    // (0 queued/running, 1 succeeded, 2 failed). result is a JSON-encoded string.
+    const data = result.data as unknown;
+    const entry = Array.isArray(data)
+      ? (data.find((i) => String((i as Record<string, unknown>).task_id) === taskId) ??
+        data[0]) as Record<string, unknown> | undefined
+      : (data as Record<string, unknown> | undefined);
+    if (!entry) continue; // no entry for us yet — keep polling
+    const statusNum = Number(entry.status);
+    if (statusNum === 2) {
+      throw new Error(`engine task failed: ${JSON.stringify(entry).slice(0, 300)}`);
     }
-    if (status === "done" || status === "completed" || status === "success") {
-      const audioRes = await fetch(`${base}/v1/audio?task_id=${encodeURIComponent(taskId)}`, {
-        headers,
-      });
+    if (statusNum === 1) {
+      let parsed: Array<Record<string, unknown>> = [];
+      try {
+        parsed = JSON.parse(String(entry.result ?? "[]")) as Array<Record<string, unknown>>;
+      } catch {
+        parsed = [];
+      }
+      const first = parsed[0] ?? {};
+      const file = String(first.file ?? "");
+      if (!file) throw new Error("engine succeeded but returned no audio file");
+      const audioRes = await fetch(`${base}${file}`, { headers });
       if (!audioRes.ok) {
         throw new Error(`fetching audio failed (${audioRes.status})`);
       }
       const buf = new Uint8Array(await audioRes.arrayBuffer());
+      const metas = (first.metas ?? {}) as Record<string, unknown>;
       const durationSec =
-        typeof result.duration === "number"
-          ? result.duration
-          : (input.durationSec ?? 120);
+        typeof metas.duration === "number" ? metas.duration : (input.durationSec ?? 120);
       return { bytes: buf, durationSec, model: cfg.model };
     }
-    // still working — keep polling
+    // status 0 — still working, keep polling
   }
 }
 
