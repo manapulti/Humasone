@@ -1,0 +1,17 @@
+services:
+  app:
+    build: .
+    ports:
+      - "3000:3000"
+    volumes:
+      - app-data:/app/data
+    environment:
+      # Point the app at the engine here, or flip it in the app's Engine settings.
+      # ENGINE_MODE: "stub"
+      # ENGINE_URL: "http://host.docker.internal:8001"
+      # ENGINE_MODEL: "acestep-v15-turbo"
+      PORT: "3000"
+    restart: unless-stopped
+
+volumes:
+  app-data:
