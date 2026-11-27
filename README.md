@@ -5,8 +5,7 @@ hum-word style vocabulary, ledger provenance per track, voice seats, stems,
 library, and a full player — running on his own ACE-Step engine. No per-song
 cost, no one's meter running. The app is his instrument, not a subscription.
 
-> The app's true name is still Anthony's call. Until then it is simply
-> **Humasone**.
+> **Humasone** — the name is Anthony's, and it is settled.
 
 ## Run it
 
